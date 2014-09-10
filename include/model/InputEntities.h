@@ -11,13 +11,10 @@
 #include <memory> // for std::unique_ptr
 #include <utility> // for std::swap
 
-#include "utils/make_unique.h"
+#include <clang/AST/Decl.h>
+#include <llvm/Support/Casting.h>
 
-// forward decls
-namespace clang {
-class Decl;
-class ValueDecl;
-}
+#include "utils/make_unique.h"
 
 namespace LintBleed {
 
@@ -25,6 +22,22 @@ namespace LintBleed {
 /// Encodes a value that refers to user-controlled input.
 class InputEntity {
 public:
+  // needed for LLVM-Style RTTI (http://llvm.org/docs/HowToSetUpLLVMStyleRTTI.html)
+  enum InputEntityKind {
+    IEK_InputValue,
+    IEK_PointerTo,
+    IEK_InputLValue
+  };
+private:
+  const InputEntityKind Kind;
+public:
+  InputEntityKind getKind() const { return Kind; }
+
+  InputEntity(InputEntityKind K) noexcept : Kind(K) {}
+  InputEntity(const InputEntity& other) noexcept : Kind(other.Kind) {}
+  InputEntity(InputEntity&& other) noexcept : Kind(other.Kind) {}
+  InputEntity& operator=(const InputEntity& other) = default;
+  InputEntity& operator=(InputEntity&& other) = default;
   virtual ~InputEntity() = default;
 
   std::unique_ptr<InputEntity> clone() const { return do_clone(); }
@@ -51,6 +64,16 @@ private:
 
 template<class T>
 class PointerTo : public InputEntity {
+public:
+  PointerTo() : InputEntity(IEK_PointerTo) {}
+  PointerTo(const PointerTo&) = default;
+  PointerTo(PointerTo&&) = default;
+  PointerTo& operator=(const PointerTo&) = default;
+  PointerTo& operator=(PointerTo&&) = default;
+
+  static bool classof(const InputEntity* IE) {
+    return IE->getKind() == IEK_PointerTo;
+  }
 private:
   std::unique_ptr<InputEntity> do_clone() const override { return make_unique<PointerTo<T>>(); }
   std::unique_ptr<InputEntity> do_add_or_sub() override { return clone(); }
@@ -64,6 +87,16 @@ private:
 };
 
 class InputValue : public InputEntity {
+public:
+  InputValue() : InputEntity(IEK_InputValue) {}
+  InputValue(const InputValue&) = default;
+  InputValue(InputValue&&) = default;
+  InputValue& operator=(const InputValue&) = default;
+  InputValue& operator=(InputValue&&) = default;
+
+  static bool classof(const InputEntity* IE) {
+    return IE->getKind() == IEK_InputValue;
+  }
 private:
   std::unique_ptr<InputEntity> do_clone() const override { return make_unique<InputValue>(); }
   std::unique_ptr<InputEntity> do_add_or_sub() override { return clone(); }
@@ -94,6 +127,8 @@ class PointerTo<PointerTo<PointerTo<PointerTo<PointerTo<T>>>>> : public InputEnt
   std::unique_ptr<InputEntity> do_deref() const override { return make_unique<T>(); }
   std::unique_ptr<InputEntity> do_subscript() const override { return make_unique<T>(); }
   std::unique_ptr<InputEntity> do_addrof() const override { assert(false && "Too many levels of pointer indirection!"); return 0; }
+ public:
+  PointerTo() : InputEntity(IEK_PointerTo) {}
 };
 
 /// Encodes an LValue InputEntity
@@ -102,23 +137,24 @@ private:
   /// underlying value
   std::unique_ptr<InputEntity> m_value;
   /// the declaration
-  clang::ValueDecl* m_decl;
+  const clang::ValueDecl* m_decl;
 public:
-  InputLValue(std::unique_ptr<InputEntity>&& value, clang::ValueDecl *decl) 
-    : m_value(std::move(value)), m_decl(decl) {}
+  InputLValue(std::unique_ptr<InputEntity>&& value, const clang::ValueDecl* decl) noexcept 
+    : InputEntity(IEK_InputLValue), m_value(std::move(value)), m_decl(decl) {assert(m_decl);}
 
   // default methods
   InputLValue(InputLValue&&) = default;
   ~InputLValue() = default; // we don't own m_decl
 
   // custom copy/assignemnt
-  InputLValue(const InputLValue& other) : m_value(other.m_value->clone()), m_decl(other.m_decl) {}
-  InputLValue& operator=(InputLValue other) {
+  InputLValue(const InputLValue& other)
+    : InputEntity(IEK_InputLValue), m_value(std::move(other.m_value->clone())), m_decl(other.m_decl) {}
+  InputLValue& operator=(InputLValue other) noexcept {
     swap(*this, other);
     return *this;
   }
 
-  friend void swap(InputLValue& first, InputLValue& second) noexcept(true) {
+  friend void swap(InputLValue& first, InputLValue& second) noexcept {
     using std::swap;
     swap(first.m_value, second.m_value);
     swap(first.m_decl, second.m_decl);
@@ -127,6 +163,9 @@ public:
   const clang::ValueDecl* decl() const { return m_decl; }
   const clang::Decl* canonicalDecl() const;
 
+  static bool classof(const InputEntity* IE) {
+    return IE->getKind() == IEK_InputLValue;
+  }
 private:
   std::unique_ptr<InputEntity> do_clone() const override { return make_unique<InputLValue>(*this); }
   std::unique_ptr<InputEntity> do_add_or_sub() override { return m_value->add_or_sub(); }

@@ -7,10 +7,12 @@
 
 #include "model/InputEntities.h"
 
-#include "clang/AST/Decl.h"
-
 using namespace LintBleed;
 
 const clang::Decl* InputLValue::canonicalDecl() const {
   return m_decl->getCanonicalDecl();
 }
+
+// std::unique_ptr<InputEntity> InputEntity::clone() const {
+//   return do_clone();
+// }
